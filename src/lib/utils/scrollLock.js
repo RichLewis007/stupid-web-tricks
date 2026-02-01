@@ -339,6 +339,11 @@ export function cleanupScrollLock() {
     resizeHandler = null;
   }
 
+  if (scrollCheckInterval) {
+    clearInterval(scrollCheckInterval);
+    scrollCheckInterval = null;
+  }
+
   // Unlock and clear intervals
   unlockScroll();
 }
