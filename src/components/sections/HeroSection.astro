@@ -55,6 +55,8 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
     </div>
   </div>
 
+  <span id="lead-score-line" class="lead-score-line" aria-hidden="true"></span>
+
   <!-- Particle trail canvas -->
   <canvas id="particleTrail" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
   <!-- Laser overlay canvas -->
@@ -240,6 +242,133 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
   let laserWinningStartTime = null;
   let laserLabelChanged = false;
 
+  const LASER_MISS_GLOW_CLASS = 'laser-status-dot--angry';
+  const LASER_MISS_EVENT_NAME = 'laser:miss';
+  const LEAD_LINE_CLASS_PLAYER = 'lead-score-line--player';
+  const LEAD_LINE_CLASS_LASER = 'lead-score-line--laser';
+  const LEAD_LINE_ANIM_MS = 600;
+
+  function triggerLaserMissGlow() {
+    const dotEl = document.getElementById('laser-status-dot');
+    if (!dotEl) return;
+    dotEl.classList.remove(LASER_MISS_GLOW_CLASS);
+    void dotEl.offsetWidth;
+    dotEl.classList.add(LASER_MISS_GLOW_CLASS);
+  }
+
+  window.addEventListener(LASER_MISS_EVENT_NAME, triggerLaserMissGlow);
+
+  let lastLeader = null;
+  let lastNonTieLeader = null;
+  let leadLineAnimating = false;
+
+  function getLeader(stats) {
+    if (stats.laserPops > stats.pointerPops) return 'laser';
+    if (stats.pointerPops > stats.laserPops) return 'player';
+    return 'tie';
+  }
+
+  function getLeadLineMetrics(labelEl, heroRect) {
+    const rect = labelEl.getBoundingClientRect();
+    return {
+      left: rect.left - heroRect.left,
+      top: rect.bottom - heroRect.top,
+      width: rect.width,
+    };
+  }
+
+  function setLeadLineInstant(leadLineEl, metrics, leaderClass) {
+    leadLineEl.style.transition = 'none';
+    leadLineEl.style.left = `${metrics.left}px`;
+    leadLineEl.style.top = `${metrics.top}px`;
+    leadLineEl.style.width = `${metrics.width}px`;
+    leadLineEl.style.opacity = '1';
+    leadLineEl.classList.remove(LEAD_LINE_CLASS_PLAYER, LEAD_LINE_CLASS_LASER);
+    leadLineEl.classList.add(leaderClass);
+    void leadLineEl.offsetWidth;
+    leadLineEl.style.transition = '';
+  }
+
+  function animateLeadLine(leadLineEl, fromMetrics, toMetrics, fromClass, toClass) {
+    leadLineEl.style.transition = 'none';
+    leadLineEl.style.left = `${fromMetrics.left}px`;
+    leadLineEl.style.top = `${fromMetrics.top}px`;
+    leadLineEl.style.width = `${fromMetrics.width}px`;
+    leadLineEl.style.opacity = '1';
+    leadLineEl.classList.remove(LEAD_LINE_CLASS_PLAYER, LEAD_LINE_CLASS_LASER);
+    leadLineEl.classList.add(fromClass);
+    void leadLineEl.offsetWidth;
+    leadLineEl.style.transition = '';
+    leadLineEl.classList.remove(fromClass);
+    leadLineEl.classList.add(toClass);
+    leadLineEl.style.left = `${toMetrics.left}px`;
+    leadLineEl.style.top = `${toMetrics.top}px`;
+    leadLineEl.style.width = `${toMetrics.width}px`;
+    leadLineAnimating = true;
+    setTimeout(() => {
+      leadLineAnimating = false;
+    }, LEAD_LINE_ANIM_MS);
+  }
+
+  function updateLeadLine(stats) {
+    const leadLineEl = document.getElementById('lead-score-line');
+    const playerLabelEl = document.getElementById('player-label');
+    const laserLabelEl = document.getElementById('laser-label');
+    const playerLineEl = document.getElementById('player-score-line');
+    const laserLineEl = document.getElementById('laser-score-line');
+    const heroSection = document.querySelector('.hero-section');
+    if (
+      !leadLineEl ||
+      !playerLabelEl ||
+      !laserLabelEl ||
+      !playerLineEl ||
+      !laserLineEl ||
+      !heroSection
+    ) {
+      return;
+    }
+
+    const leader = getLeader(stats);
+    if (leader === 'tie') {
+      playerLineEl.style.opacity = '1';
+      laserLineEl.style.opacity = '1';
+      leadLineEl.style.opacity = '0';
+      lastLeader = 'tie';
+      return;
+    }
+
+    playerLineEl.style.opacity = '0';
+    laserLineEl.style.opacity = '0';
+
+    const heroRect = heroSection.getBoundingClientRect();
+    const playerMetrics = getLeadLineMetrics(playerLabelEl, heroRect);
+    const laserMetrics = getLeadLineMetrics(laserLabelEl, heroRect);
+    const targetMetrics = leader === 'player' ? playerMetrics : laserMetrics;
+    const targetClass = leader === 'player' ? LEAD_LINE_CLASS_PLAYER : LEAD_LINE_CLASS_LASER;
+
+    if (!lastNonTieLeader) {
+      setLeadLineInstant(leadLineEl, targetMetrics, targetClass);
+      lastLeader = leader;
+      lastNonTieLeader = leader;
+      return;
+    }
+
+    if (leader === lastNonTieLeader) {
+      if (leadLineAnimating) return;
+      setLeadLineInstant(leadLineEl, targetMetrics, targetClass);
+      lastLeader = leader;
+      lastNonTieLeader = leader;
+      return;
+    }
+
+    const fromMetrics = lastNonTieLeader === 'player' ? playerMetrics : laserMetrics;
+    const fromClass =
+      lastNonTieLeader === 'player' ? LEAD_LINE_CLASS_PLAYER : LEAD_LINE_CLASS_LASER;
+    animateLeadLine(leadLineEl, fromMetrics, targetMetrics, fromClass, targetClass);
+    lastLeader = leader;
+    lastNonTieLeader = leader;
+  }
+
   // Update pop counters display and laser status dot
   function updatePopCounters() {
     const userCountEl = document.getElementById('user-pop-count');
@@ -293,25 +422,7 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
         }
       }
 
-      // Show/hide laser score line based on score comparison
-      const laserLineEl = document.getElementById('laser-score-line');
-      if (laserLineEl) {
-        if (stats.laserPops > stats.pointerPops) {
-          laserLineEl.style.display = 'block';
-        } else {
-          laserLineEl.style.display = 'none';
-        }
-      }
-
-      // Show/hide player score line based on score comparison
-      const playerLineEl = document.getElementById('player-score-line');
-      if (playerLineEl) {
-        if (stats.pointerPops > stats.laserPops) {
-          playerLineEl.style.display = 'block';
-        } else {
-          playerLineEl.style.display = 'none';
-        }
-      }
+      updateLeadLine(stats);
     }
 
     // Update laser status dot size based on firing rate level
@@ -382,6 +493,65 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
     flex-shrink: 0;
   }
 
+  .laser-status-dot--angry {
+    animation: laser-angry-flash 0.35s ease-out;
+  }
+
+  @keyframes laser-angry-flash {
+    0% {
+      box-shadow:
+        0 0 6px rgba(255, 40, 40, 0.95),
+        0 0 14px rgba(255, 60, 60, 0.9),
+        0 0 24px rgba(255, 90, 90, 0.85);
+    }
+    100% {
+      box-shadow:
+        0 0 4px rgba(255, 40, 40, 0.8),
+        0 0 8px rgba(255, 40, 40, 0.6),
+        0 0 12px rgba(255, 40, 40, 0.4);
+    }
+  }
+
+  .lead-score-line {
+    position: absolute;
+    height: 2px;
+    border-radius: 2px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 50;
+    transition:
+      left 0.6s ease,
+      top 0.6s ease,
+      width 0.6s ease,
+      background 0.6s ease,
+      box-shadow 0.6s ease,
+      opacity 0.2s ease;
+  }
+
+  .lead-score-line--player {
+    background: linear-gradient(
+      to right,
+      rgba(255, 220, 120, 0.7) 0%,
+      rgba(255, 200, 40, 1) 50%,
+      rgba(255, 220, 120, 0.7) 100%
+    );
+    box-shadow:
+      0 0 4px rgba(255, 200, 40, 0.8),
+      0 0 8px rgba(255, 220, 60, 0.6);
+  }
+
+  .lead-score-line--laser {
+    background: linear-gradient(
+      to right,
+      rgba(255, 120, 120, 0.7) 0%,
+      rgba(255, 40, 40, 1) 50%,
+      rgba(255, 120, 120, 0.7) 100%
+    );
+    box-shadow:
+      0 0 4px rgba(255, 40, 40, 0.8),
+      0 0 8px rgba(255, 60, 60, 0.6);
+  }
+
   /* Laser score line - appears when laser is winning */
   .laser-score-line {
     position: absolute;
@@ -398,7 +568,7 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
     box-shadow:
       0 0 4px rgba(255, 40, 40, 0.8),
       0 0 8px rgba(255, 60, 60, 0.6);
-    display: none;
+    opacity: 0;
     transition: opacity 0.3s ease;
   }
 
@@ -418,7 +588,7 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
     box-shadow:
       0 0 4px rgba(255, 200, 40, 0.8),
       0 0 8px rgba(255, 220, 60, 0.6);
-    display: none;
+    opacity: 0;
     transition: opacity 0.3s ease;
   }
 

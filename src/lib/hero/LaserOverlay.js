@@ -77,6 +77,8 @@ const LASER_SOUND_RELEASE_GAIN = 0.01;
 const DEFAULT_DPR = 1;
 const MAX_DPR = 2;
 
+const LASER_MISS_EVENT_NAME = 'laser:miss';
+
 // Shared laser segment state so other systems can react
 /** @type {import('./types.js').LaserSegment | null} */
 let activeLaserSegment = null;
@@ -294,6 +296,15 @@ export class LaserOverlay {
     return cycleIndex < missCount;
   }
 
+  emitMissEvent() {
+    if (typeof window === 'undefined') return;
+    try {
+      window.dispatchEvent(new CustomEvent(LASER_MISS_EVENT_NAME));
+    } catch (error) {
+      console.debug('LaserOverlay: Could not dispatch miss event', error);
+    }
+  }
+
   findSafeMissEnd(start, width, height, bubbles) {
     const hasBubbles = Array.isArray(bubbles) && bubbles.length > 0;
     for (let attempt = 0; attempt < LASER_MISS_MAX_ATTEMPTS; attempt += 1) {
@@ -477,6 +488,7 @@ export class LaserOverlay {
       if (!missEnd) return;
       this.playLaserSound();
       this.drawLaser(start, missEnd);
+      this.emitMissEvent();
       return;
     }
 
@@ -497,6 +509,7 @@ export class LaserOverlay {
       if (!missEnd) return;
       this.playLaserSound();
       this.drawLaser(start, missEnd);
+      this.emitMissEvent();
       return;
     }
 

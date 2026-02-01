@@ -4,6 +4,8 @@
  * Soap Bubbles Animation System
  * @class
  */
+const LASER_COLLISION_PADDING_PX = 4;
+
 export class SoapBubbles {
   /**
    * @constructor
@@ -809,6 +811,9 @@ export class SoapBubbles {
     const screenWidth = this.canvas.width;
     const screenHeight = this.canvas.height;
     const activeLaser = (typeof window !== 'undefined' && window.activeLaserSegment) || null;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const isLaserActive =
+      activeLaser && (activeLaser.expires === undefined || now <= activeLaser.expires);
 
     // Limit shapes array size to prevent memory issues (safety check)
     const maxShapes = 200;
@@ -882,11 +887,11 @@ export class SoapBubbles {
       }
 
       // Laser collision: pop if segment intersects
-      if (activeLaser && !shape.isPopping && !shape.forcePop) {
+      if (isLaserActive && !shape.isPopping && !shape.forcePop) {
         const hit = this.segmentCircleHit(activeLaser.start, activeLaser.end, {
           x: shape.x,
           y: shape.y,
-          r: shape.radius || 0,
+          r: (shape.radius || 0) + LASER_COLLISION_PADDING_PX,
         });
         if (hit) {
           shape.forcePop = true;
