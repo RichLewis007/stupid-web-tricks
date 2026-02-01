@@ -50,6 +50,7 @@ export class SoapBubbles {
     this.isVisible = true;
     this.visibilityHandler = null;
     this.isOnScreen = true;
+    this.tapAudioContext = null;
 
     // Bind handlers to preserve context
     this.resizeHandler = () => this.resizeCanvas();
@@ -332,6 +333,54 @@ export class SoapBubbles {
     }
   }
 
+  playTapSound() {
+    // Don't play sounds when off screen
+    if (!this.isOnScreen) return;
+
+    // Check if sounds are muted
+    try {
+      if (typeof window !== 'undefined') {
+        const muted = localStorage.getItem('soundEffectsMuted') === 'true';
+        if (muted) return;
+      }
+    } catch (error) {
+      // Silently fail if localStorage is not available
+    }
+
+    try {
+      if (!this.tapAudioContext) {
+        const AudioContext = window.AudioContext || window['webkitAudioContext'];
+        this.tapAudioContext = new AudioContext();
+      }
+
+      if (this.tapAudioContext.state === 'suspended') {
+        this.tapAudioContext.resume();
+      }
+
+      const ctx = this.tapAudioContext;
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      const startTime = ctx.currentTime;
+      const duration = 0.06;
+
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(220, startTime);
+
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.linearRampToValueAtTime(0.08, startTime + 0.005);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+      oscillator.start(startTime);
+      oscillator.stop(startTime + duration);
+    } catch (error) {
+      console.debug('SoapBubbles: Could not play tap sound', error);
+    }
+  }
+
   handleMouseMove(e) {
     if (!this.config.enableMouseInteraction && !this.config.enableMousePop) return;
 
@@ -349,6 +398,7 @@ export class SoapBubbles {
       return;
     }
 
+    let didPop = false;
     // Find clicked bubble and trigger pop animation (don't explode immediately)
     for (let i = this.shapes.length - 1; i >= 0; i--) {
       const shape = this.shapes[i];
@@ -365,8 +415,13 @@ export class SoapBubbles {
         shape.popPhase = 0;
         shape.popReason = 'pointer'; // Track pop reason
         this.triggerPopSound(shape);
+        didPop = true;
         break;
       }
+    }
+
+    if (!didPop) {
+      this.playTapSound();
     }
   }
 
@@ -682,6 +737,11 @@ export class SoapBubbles {
 
     if (this.ctx && this.canvas) {
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+
+    if (this.tapAudioContext && this.tapAudioContext.state !== 'closed') {
+      this.tapAudioContext.close().catch(() => {});
+      this.tapAudioContext = null;
     }
   }
 

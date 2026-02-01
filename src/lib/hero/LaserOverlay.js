@@ -1,30 +1,53 @@
 // Laser Overlay - Draws laser beams that pop bubbles
+// Summary:
+// - Tuning knobs are grouped at the top; tweak numbers there to change behavior.
+// - Firing rate uses 4 levels (slow -> fast), jumps up at score thresholds, and can auto-escalate if stuck.
+// - Miss pattern is deterministic per level (1/5 misses on levels 1-2, 2/5 on levels 3-4).
 
 import { randomEdgePoint, extendToBoundary, segmentCircleHit } from './helpers.js';
 
-export const LASER_INTERVAL_MS = 10000; // every 10 seconds
-
-const DEFAULT_DPR = 1;
-const MAX_DPR = 2;
-
+// === Tuning: change numbers below to tweak behavior ===
+// === Tuning: firing rates (slow -> fast) ===
+export const LASER_INTERVAL_MS = 6000; // Base interval (Level 1)
+// Keep 4 entries, ordered slow -> fast.
+const LASER_RATE_LEVELS_MS = [
+  LASER_INTERVAL_MS, // Level 1 (slowest)
+  3000, // Level 2
+  1000, // Level 3
+  500, // Level 4 (fastest)
+];
+const LASER_RATE_MAX_LEVEL_INDEX = LASER_RATE_LEVELS_MS.length - 1;
+const LASER_START_LEVEL_INDEX = 0;
+const LASER_LEADING_RESET_LEVEL_INDEX = 0; // Reset to this level when laser leads
+const LASER_LEVEL_STALE_MS = 10000; // Time at a level before auto-escalating
+const LASER_LEAD_STEP_DOWN_MS = 10000; // Time leading before stepping down again
+const LASER_LEVEL2_BEHIND_POINTS = 10;
+const LASER_LEVEL3_BEHIND_POINTS = 15;
+const LASER_LEVEL4_BEHIND_POINTS = 20;
 const LASER_INITIAL_FIRE_DELAY_MS = 3000;
 const LASER_INTERVAL_MONITOR_START_DELAY_MS = 2000;
 const LASER_INTERVAL_MONITOR_PERIOD_MS = 1000;
 
-const LASER_FAST_INTERVAL_MS = LASER_INTERVAL_MS / 2; // 5 seconds
-const LASER_VERY_FAST_INTERVAL_MS = LASER_INTERVAL_MS / 4; // 2.5 seconds
-const LASER_FAST_THRESHOLD_POINTS = 10;
-const LASER_VERY_FAST_THRESHOLD_POINTS = 20;
+// === Tuning: miss pattern ===
+const LASER_MISS_CYCLE_SHOTS = 5; // 1 cycle = 5 shots
+const LASER_MISS_FIRST_LEVEL_COUNT = 2; // First 2 levels use early miss rate
+const LASER_MISS_COUNT_EARLY_LEVELS = 1; // Miss 1/5 shots on levels 1-2
+const LASER_MISS_COUNT_LATE_LEVELS = 2; // Miss 2/5 shots on levels 3-4
+const LASER_MISS_MAX_ATTEMPTS = 12; // Try this many lines to avoid bubbles
+const LASER_MISS_CLEARANCE_PX = 4; // Extra padding to avoid near-misses
 
+// === Tuning: targeting + aim nudges ===
 const LASER_EDGE_PADDING_PX = 60;
 const LASER_TARGET_POOL_SIZE = 6;
 const LASER_DIRECTION_MIN_COMPONENT = 1;
 const LASER_DIRECTION_NUDGE = 0.5;
 const LASER_DIRECTION_RANDOM_THRESHOLD = 0.5;
 
+// === Tuning: laser lifetime ===
 const LASER_ACTIVE_DURATION_MS = 1300;
 const LASER_ACTIVE_CLEAR_DELAY_MS = 1400;
 
+// === Tuning: beam visuals ===
 const LASER_LINE_WIDTH_PX = 2;
 const LASER_SHADOW_BLUR_PX = 6;
 const LASER_SHADOW_COLOR = 'rgba(255, 60, 60, 0.8)';
@@ -33,10 +56,12 @@ const LASER_GRADIENT_MID_STOP = 0.5;
 const LASER_GRADIENT_MID = 'rgba(255, 40, 40, 1)';
 const LASER_GRADIENT_END = 'rgba(255, 120, 120, 0.7)';
 
+// === Tuning: fade timing ===
 const LASER_FADE_DELAY_MS = 200;
 const LASER_FADE_DURATION_S = 0.8;
 const LASER_CLEAR_DELAY_MS = 1100;
 
+// === Tuning: laser sound ===
 const LASER_SOUND_DURATION_S = 0.3;
 const LASER_SOUND_START_FREQ_HZ = 3000;
 const LASER_SOUND_END_FREQ_HZ = 1000;
@@ -47,6 +72,10 @@ const LASER_SOUND_DECAY_GAIN = 0.12;
 const LASER_SOUND_SUSTAIN_TIME_S = 0.2;
 const LASER_SOUND_SUSTAIN_GAIN = 0.12;
 const LASER_SOUND_RELEASE_GAIN = 0.01;
+
+// === Rendering ===
+const DEFAULT_DPR = 1;
+const MAX_DPR = 2;
 
 // Shared laser segment state so other systems can react
 /** @type {import('./types.js').LaserSegment | null} */
@@ -80,7 +109,12 @@ export class LaserOverlay {
     this.visibilityHandler = null;
     this.audioContext = null;
     this.isOnScreen = true;
-    this.currentInterval = LASER_INTERVAL_MS;
+    this.rateLevelsMs = LASER_RATE_LEVELS_MS;
+    this.rateLevelIndex = LASER_START_LEVEL_INDEX;
+    this.rateLevelStartTime = null;
+    this.leadStepStartTime = null;
+    this.shotsFiredInLevel = 0;
+    this.currentInterval = LASER_RATE_LEVELS_MS[this.rateLevelIndex];
   }
 
   /**
@@ -238,9 +272,70 @@ export class LaserOverlay {
     }, this.currentInterval);
   }
 
+  setRateLevel(levelIndex, now) {
+    const clampedLevel = Math.max(0, Math.min(levelIndex, LASER_RATE_MAX_LEVEL_INDEX));
+    this.rateLevelIndex = clampedLevel;
+    this.currentInterval = LASER_RATE_LEVELS_MS[clampedLevel];
+    this.rateLevelStartTime = now;
+    this.shotsFiredInLevel = 0;
+    this.startInterval(); // Restart interval with new timing
+  }
+
+  getMissCountForLevel(levelIndex) {
+    return levelIndex < LASER_MISS_FIRST_LEVEL_COUNT
+      ? LASER_MISS_COUNT_EARLY_LEVELS
+      : LASER_MISS_COUNT_LATE_LEVELS;
+  }
+
+  shouldMissShot() {
+    const missCount = this.getMissCountForLevel(this.rateLevelIndex);
+    if (missCount <= 0) return false;
+    const cycleIndex = this.shotsFiredInLevel % LASER_MISS_CYCLE_SHOTS;
+    return cycleIndex < missCount;
+  }
+
+  findSafeMissEnd(start, width, height, bubbles) {
+    const hasBubbles = Array.isArray(bubbles) && bubbles.length > 0;
+    for (let attempt = 0; attempt < LASER_MISS_MAX_ATTEMPTS; attempt += 1) {
+      const missPoint = { x: Math.random() * width, y: Math.random() * height };
+      let missDir = { x: missPoint.x - start.x, y: missPoint.y - start.y };
+      missDir = this.adjustDirection(missDir);
+      const end = extendToBoundary(start, missDir, width, height, LASER_EDGE_PADDING_PX);
+      if (!hasBubbles) return end;
+
+      let hit = false;
+      for (const b of bubbles) {
+        const radius = (b?.radius || 0) + LASER_MISS_CLEARANCE_PX;
+        if (segmentCircleHit(start, end, { x: b.x, y: b.y, r: radius })) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) return end;
+    }
+    return null;
+  }
+
+  getScoreLevel(pointDifference) {
+    if (pointDifference >= LASER_LEVEL4_BEHIND_POINTS) return 3;
+    if (pointDifference >= LASER_LEVEL3_BEHIND_POINTS) return 2;
+    if (pointDifference >= LASER_LEVEL2_BEHIND_POINTS) return 1;
+    return 0;
+  }
+
+  adjustDirection(dir) {
+    if (Math.abs(dir.x) < LASER_DIRECTION_MIN_COMPONENT) {
+      dir.x += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
+    }
+    if (Math.abs(dir.y) < LASER_DIRECTION_MIN_COMPONENT) {
+      dir.y += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
+    }
+    return dir;
+  }
+
   /**
    * Monitor pop stats and adjust laser interval based on player performance
-   * Once the laser speeds up, it NEVER slows down until laser score >= player score
+   * Escalate based on score difference, and auto-escalate if stuck at a level.
    * @returns {void}
    */
   startIntervalMonitor() {
@@ -250,57 +345,76 @@ export class LaserOverlay {
         const stats = bubbles.getPopStats();
         const playerScore = stats.pointerPops;
         const laserScore = stats.laserPops;
+        const now = performance.now();
 
-        let newInterval = this.currentInterval; // Default: keep current rate
+        const laserLeading = laserScore > playerScore;
+        const pointDifference = Math.max(0, playerScore - laserScore);
+        const targetLevel = this.getScoreLevel(pointDifference);
 
-        // Only reduce firing rate (slow down) when laser score >= player score
-        // AND we're currently at a faster rate
-        if (
-          laserScore >= playerScore &&
-          laserScore > 0 &&
-          this.currentInterval < LASER_INTERVAL_MS
-        ) {
-          // Laser has caught up or is ahead - slow down to normal rate
-          newInterval = LASER_INTERVAL_MS; // Normal rate (10 seconds)
-          console.log(
-            `Laser caught up! (${laserScore} >= ${playerScore}) Slowing down from ${this.currentInterval}ms to ${newInterval}ms`,
-          );
-        }
-        // Speed up based on point difference (only when laser is behind)
-        // IMPORTANT: Once sped up, we NEVER slow down until laserScore >= playerScore
-        else if (playerScore > laserScore) {
-          const pointDifference = playerScore - laserScore;
-          // If laser is behind by LASER_VERY_FAST_THRESHOLD_POINTS+, use very fast rate
-          // Only speed up if not already at this rate or faster (smaller interval = faster)
-          if (pointDifference >= LASER_VERY_FAST_THRESHOLD_POINTS) {
-            if (this.currentInterval > LASER_VERY_FAST_INTERVAL_MS) {
-              newInterval = LASER_VERY_FAST_INTERVAL_MS;
+        if (laserLeading) {
+          if (this.leadStepStartTime === null) {
+            this.leadStepStartTime = now;
+            if (this.rateLevelIndex > LASER_LEADING_RESET_LEVEL_INDEX) {
+              const previousLevel = this.rateLevelIndex;
+              const nextLevel = this.rateLevelIndex - 1;
+              this.setRateLevel(nextLevel, now);
               console.log(
-                `Laser behind by ${pointDifference} points, speeding up to very fast rate (${newInterval}ms)`,
+                `Laser leading (${laserScore} > ${playerScore}) Stepping down from Level ${
+                  previousLevel + 1
+                } to Level ${nextLevel + 1} (${this.currentInterval}ms)`,
               );
             }
-            // Already at very fast or faster, keep it
-          }
-          // Else if laser is behind by LASER_FAST_THRESHOLD_POINTS+, use fast rate
-          // Only speed up if currently at normal rate (not already at fast or very fast)
-          else if (pointDifference >= LASER_FAST_THRESHOLD_POINTS) {
-            if (this.currentInterval >= LASER_INTERVAL_MS) {
-              newInterval = LASER_FAST_INTERVAL_MS;
+          } else {
+            const leadElapsed = now - this.leadStepStartTime;
+            if (
+              leadElapsed >= LASER_LEAD_STEP_DOWN_MS &&
+              this.rateLevelIndex > LASER_LEADING_RESET_LEVEL_INDEX
+            ) {
+              const previousLevel = this.rateLevelIndex;
+              const nextLevel = this.rateLevelIndex - 1;
+              this.setRateLevel(nextLevel, now);
+              this.leadStepStartTime = now;
               console.log(
-                `Laser behind by ${pointDifference} points, speeding up to fast rate (${newInterval}ms)`,
+                `Laser still leading after ${LASER_LEAD_STEP_DOWN_MS}ms, stepping down from Level ${
+                  previousLevel + 1
+                } to Level ${nextLevel + 1} (${this.currentInterval}ms)`,
               );
             }
-            // Already at fast or very fast, keep it (never slow down)
           }
-          // If player is ahead but by less than LASER_FAST_THRESHOLD_POINTS, keep current rate
-          // This ensures we NEVER slow down until laserScore >= playerScore
-        }
-        // If scores are equal (both 0 or same value) and laser is at normal rate, keep it
+          this.rateLevelStartTime = null;
+        } else {
+          this.leadStepStartTime = null;
+          if (targetLevel > this.rateLevelIndex) {
+            const previousLevel = this.rateLevelIndex;
+            this.setRateLevel(targetLevel, now);
+            console.log(
+              `Laser behind by ${pointDifference} points, jumping from Level ${
+                previousLevel + 1
+              } to Level ${targetLevel + 1} (${this.currentInterval}ms)`,
+            );
+          } else {
+            if (this.rateLevelStartTime === null) {
+              this.rateLevelStartTime = now;
+            }
 
-        // Only update if interval changed
-        if (newInterval !== this.currentInterval) {
-          this.currentInterval = newInterval;
-          this.startInterval(); // Restart interval with new timing
+            const elapsed = now - this.rateLevelStartTime;
+            if (elapsed >= LASER_LEVEL_STALE_MS) {
+              if (this.rateLevelIndex < LASER_RATE_MAX_LEVEL_INDEX) {
+                const currentLevel = this.rateLevelIndex;
+                const nextLevel = this.rateLevelIndex + 1;
+                this.setRateLevel(nextLevel, now);
+                console.log(
+                  `Laser stuck at Level ${
+                    currentLevel + 1
+                  } for ${LASER_LEVEL_STALE_MS}ms, escalating to Level ${
+                    nextLevel + 1
+                  } (${this.currentInterval}ms)`,
+                );
+              } else {
+                this.rateLevelStartTime = now;
+              }
+            }
+          }
         }
       }
 
@@ -353,6 +467,19 @@ export class LaserOverlay {
       return;
     }
 
+    const shouldMiss = this.shouldMissShot();
+    this.shotsFiredInLevel += 1;
+
+    const start = randomEdgePoint(width, height, LASER_EDGE_PADDING_PX);
+
+    if (shouldMiss) {
+      const missEnd = this.findSafeMissEnd(start, width, height, mainBubbles);
+      if (!missEnd) return;
+      this.playLaserSound();
+      this.drawLaser(start, missEnd);
+      return;
+    }
+
     // largest of top pool
     const ranked = [...mainBubbles]
       .filter(
@@ -365,16 +492,16 @@ export class LaserOverlay {
       .sort((a, b) => b.radius - a.radius)
       .slice(0, LASER_TARGET_POOL_SIZE);
     const target = ranked[0];
-    if (!target) return;
+    if (!target) {
+      const missEnd = this.findSafeMissEnd(start, width, height, mainBubbles);
+      if (!missEnd) return;
+      this.playLaserSound();
+      this.drawLaser(start, missEnd);
+      return;
+    }
 
-    const start = randomEdgePoint(width, height, LASER_EDGE_PADDING_PX);
     let dir = { x: target.x - start.x, y: target.y - start.y };
-    if (Math.abs(dir.x) < LASER_DIRECTION_MIN_COMPONENT) {
-      dir.x += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
-    }
-    if (Math.abs(dir.y) < LASER_DIRECTION_MIN_COMPONENT) {
-      dir.y += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
-    }
+    dir = this.adjustDirection(dir);
     const end = extendToBoundary(start, dir, width, height, LASER_EDGE_PADDING_PX);
 
     this.playLaserSound();

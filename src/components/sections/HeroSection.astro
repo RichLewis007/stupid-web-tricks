@@ -314,29 +314,18 @@ import SoundEffectsProvider from '../providers/SoundEffectsProvider';
       }
     }
 
-    // Update laser status dot size based on firing rate
+    // Update laser status dot size based on firing rate level
     // @ts-ignore
     const laserOverlay = window?.laserOverlay_instance;
-    if (laserOverlay && laserOverlay.currentInterval !== undefined) {
-      const baseInterval = 10000; // LASER_INTERVAL_MS (10 seconds)
-      const currentInterval = laserOverlay.currentInterval;
-
-      // Calculate size multiplier based on firing rate
-      // Normal (10s): 1x (6px), Fast (5s): 2x (12px), Very Fast (2.5s): 4x (24px)
-      let sizeMultiplier = 1;
-      if (currentInterval <= baseInterval / 4 + 100) {
-        // Very fast rate (2.5s) - 4x size
-        sizeMultiplier = 4;
-      } else if (currentInterval <= baseInterval / 2 + 100) {
-        // Fast rate (5s) - 2x size
-        sizeMultiplier = 2;
-      } else {
-        // Normal rate (10s) - 1x size
-        sizeMultiplier = 1;
-      }
-
-      // Base size is 6px, scale by multiplier
-      const dotSize = 6 * sizeMultiplier;
+    if (laserOverlay && typeof laserOverlay.rateLevelIndex === 'number') {
+      const dotBasePx = 6;
+      const dotStepPx = 4;
+      const levelCount = Array.isArray(laserOverlay.rateLevelsMs)
+        ? laserOverlay.rateLevelsMs.length
+        : 4;
+      const dotMaxLevel = Math.max(0, levelCount - 1);
+      const level = Math.max(0, Math.min(dotMaxLevel, laserOverlay.rateLevelIndex));
+      const dotSize = dotBasePx + level * dotStepPx;
       laserDotEl.style.width = `${dotSize}px`;
       laserDotEl.style.height = `${dotSize}px`;
     }
