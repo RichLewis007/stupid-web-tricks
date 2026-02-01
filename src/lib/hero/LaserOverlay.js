@@ -2,7 +2,7 @@
 // Summary:
 // - Tuning knobs are grouped at the top; tweak numbers there to change behavior.
 // - Firing rate uses 4 levels (slow -> fast), jumps up at score thresholds, and can auto-escalate if stuck.
-// - Miss pattern is deterministic per level (1/5 misses on levels 1-2, 2/5 on levels 3-4).
+// - Miss pattern is random per level based on misses-per-10-shots constants.
 
 import { randomEdgePoint, extendToBoundary, segmentCircleHit } from './helpers.js';
 
@@ -29,10 +29,10 @@ const LASER_INTERVAL_MONITOR_START_DELAY_MS = 2000;
 const LASER_INTERVAL_MONITOR_PERIOD_MS = 1000;
 
 // === Tuning: miss pattern ===
-const LASER_MISS_CYCLE_SHOTS = 5; // 1 cycle = 5 shots
+const LASER_MISS_SAMPLE_SHOTS = 10; // Misses are defined as counts per 10 shots
 const LASER_MISS_FIRST_LEVEL_COUNT = 2; // First 2 levels use early miss rate
-const LASER_MISS_COUNT_EARLY_LEVELS = 1; // Miss 1/5 shots on levels 1-2
-const LASER_MISS_COUNT_LATE_LEVELS = 2; // Miss 2/5 shots on levels 3-4
+const LASER_MISS_COUNT_EARLY_LEVELS = 1; // Misses per 10 shots on levels 1-2
+const LASER_MISS_COUNT_LATE_LEVELS = 2; // Misses per 10 shots on levels 3-4
 const LASER_MISS_MAX_ATTEMPTS = 12; // Try this many lines to avoid bubbles
 const LASER_MISS_CLEARANCE_PX = 4; // Extra padding to avoid near-misses
 
@@ -115,7 +115,6 @@ export class LaserOverlay {
     this.rateLevelIndex = LASER_START_LEVEL_INDEX;
     this.rateLevelStartTime = null;
     this.leadStepStartTime = null;
-    this.shotsFiredInLevel = 0;
     this.currentInterval = LASER_RATE_LEVELS_MS[this.rateLevelIndex];
   }
 
@@ -279,7 +278,6 @@ export class LaserOverlay {
     this.rateLevelIndex = clampedLevel;
     this.currentInterval = LASER_RATE_LEVELS_MS[clampedLevel];
     this.rateLevelStartTime = now;
-    this.shotsFiredInLevel = 0;
     this.startInterval(); // Restart interval with new timing
   }
 
@@ -292,8 +290,8 @@ export class LaserOverlay {
   shouldMissShot() {
     const missCount = this.getMissCountForLevel(this.rateLevelIndex);
     if (missCount <= 0) return false;
-    const cycleIndex = this.shotsFiredInLevel % LASER_MISS_CYCLE_SHOTS;
-    return cycleIndex < missCount;
+    const missChance = missCount / LASER_MISS_SAMPLE_SHOTS;
+    return Math.random() < missChance;
   }
 
   emitMissEvent() {
@@ -479,8 +477,6 @@ export class LaserOverlay {
     }
 
     const shouldMiss = this.shouldMissShot();
-    this.shotsFiredInLevel += 1;
-
     const start = randomEdgePoint(width, height, LASER_EDGE_PADDING_PX);
 
     if (shouldMiss) {
