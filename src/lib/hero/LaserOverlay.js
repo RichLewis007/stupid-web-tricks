@@ -4,6 +4,50 @@ import { randomEdgePoint, extendToBoundary, segmentCircleHit } from './helpers.j
 
 export const LASER_INTERVAL_MS = 10000; // every 10 seconds
 
+const DEFAULT_DPR = 1;
+const MAX_DPR = 2;
+
+const LASER_INITIAL_FIRE_DELAY_MS = 3000;
+const LASER_INTERVAL_MONITOR_START_DELAY_MS = 2000;
+const LASER_INTERVAL_MONITOR_PERIOD_MS = 1000;
+
+const LASER_FAST_INTERVAL_MS = LASER_INTERVAL_MS / 2; // 5 seconds
+const LASER_VERY_FAST_INTERVAL_MS = LASER_INTERVAL_MS / 4; // 2.5 seconds
+const LASER_FAST_THRESHOLD_POINTS = 10;
+const LASER_VERY_FAST_THRESHOLD_POINTS = 20;
+
+const LASER_EDGE_PADDING_PX = 60;
+const LASER_TARGET_POOL_SIZE = 6;
+const LASER_DIRECTION_MIN_COMPONENT = 1;
+const LASER_DIRECTION_NUDGE = 0.5;
+const LASER_DIRECTION_RANDOM_THRESHOLD = 0.5;
+
+const LASER_ACTIVE_DURATION_MS = 1300;
+const LASER_ACTIVE_CLEAR_DELAY_MS = 1400;
+
+const LASER_LINE_WIDTH_PX = 2;
+const LASER_SHADOW_BLUR_PX = 6;
+const LASER_SHADOW_COLOR = 'rgba(255, 60, 60, 0.8)';
+const LASER_GRADIENT_START = 'rgba(255, 120, 120, 0.7)';
+const LASER_GRADIENT_MID_STOP = 0.5;
+const LASER_GRADIENT_MID = 'rgba(255, 40, 40, 1)';
+const LASER_GRADIENT_END = 'rgba(255, 120, 120, 0.7)';
+
+const LASER_FADE_DELAY_MS = 200;
+const LASER_FADE_DURATION_S = 0.8;
+const LASER_CLEAR_DELAY_MS = 1100;
+
+const LASER_SOUND_DURATION_S = 0.3;
+const LASER_SOUND_START_FREQ_HZ = 3000;
+const LASER_SOUND_END_FREQ_HZ = 1000;
+const LASER_SOUND_ATTACK_TIME_S = 0.01;
+const LASER_SOUND_ATTACK_GAIN = 0.15;
+const LASER_SOUND_DECAY_TIME_S = 0.1;
+const LASER_SOUND_DECAY_GAIN = 0.12;
+const LASER_SOUND_SUSTAIN_TIME_S = 0.2;
+const LASER_SOUND_SUSTAIN_GAIN = 0.12;
+const LASER_SOUND_RELEASE_GAIN = 0.01;
+
 // Shared laser segment state so other systems can react
 /** @type {import('./types.js').LaserSegment | null} */
 let activeLaserSegment = null;
@@ -27,7 +71,7 @@ export class LaserOverlay {
   constructor() {
     this.canvas = null;
     this.ctx = null;
-    this.dpr = 1;
+    this.dpr = DEFAULT_DPR;
     this.intervalId = null;
     this.fadeTimeout = null;
     this.clearTimeout = null;
@@ -99,20 +143,35 @@ export class LaserOverlay {
       oscillator.connect(gainNode);
       gainNode.connect(this.audioContext.destination);
 
-      const duration = 0.3; // Longer duration
+      const duration = LASER_SOUND_DURATION_S; // Longer duration
       const startTime = this.audioContext.currentTime;
 
       // High-pitched frequency starts high and smoothly drops to lower pitch
-      oscillator.frequency.setValueAtTime(3000, startTime);
+      oscillator.frequency.setValueAtTime(LASER_SOUND_START_FREQ_HZ, startTime);
       // Smooth pitch drop from start to end over the entire duration
-      oscillator.frequency.exponentialRampToValueAtTime(1000, startTime + duration);
+      oscillator.frequency.exponentialRampToValueAtTime(
+        LASER_SOUND_END_FREQ_HZ,
+        startTime + duration,
+      );
 
       // Volume envelope: quick attack, sustain, fade out
       gainNode.gain.setValueAtTime(0, startTime);
-      gainNode.gain.linearRampToValueAtTime(0.15, startTime + 0.01); // Quick attack
-      gainNode.gain.linearRampToValueAtTime(0.12, startTime + 0.1); // Slight decay
-      gainNode.gain.setValueAtTime(0.12, startTime + 0.2); // Sustain
-      gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + duration); // Fade out at end
+      gainNode.gain.linearRampToValueAtTime(
+        LASER_SOUND_ATTACK_GAIN,
+        startTime + LASER_SOUND_ATTACK_TIME_S,
+      ); // Quick attack
+      gainNode.gain.linearRampToValueAtTime(
+        LASER_SOUND_DECAY_GAIN,
+        startTime + LASER_SOUND_DECAY_TIME_S,
+      ); // Slight decay
+      gainNode.gain.setValueAtTime(
+        LASER_SOUND_SUSTAIN_GAIN,
+        startTime + LASER_SOUND_SUSTAIN_TIME_S,
+      ); // Sustain
+      gainNode.gain.exponentialRampToValueAtTime(
+        LASER_SOUND_RELEASE_GAIN,
+        startTime + duration,
+      ); // Fade out at end
 
       // Use a sine wave for a clean, high-pitched tone
       oscillator.type = 'sine';
@@ -158,7 +217,7 @@ export class LaserOverlay {
       if (this.isVisible && this.isOnScreen) {
         this.fire(); // fire() will return early if no bubbles are available
       }
-    }, 3000); // Wait 3 seconds for bubbles to initialize
+    }, LASER_INITIAL_FIRE_DELAY_MS); // Wait for bubbles to initialize
 
     // Monitor pop stats and adjust interval dynamically
     this.startIntervalMonitor();
@@ -214,32 +273,29 @@ export class LaserOverlay {
         // IMPORTANT: Once sped up, we NEVER slow down until laserScore >= playerScore
         else if (playerScore > laserScore) {
           const pointDifference = playerScore - laserScore;
-          const veryFastInterval = LASER_INTERVAL_MS / 4; // 2.5 seconds
-          const fastInterval = LASER_INTERVAL_MS / 2; // 5 seconds
-
-          // If laser is behind by 20+ points, use very fast rate (2.5 seconds)
+          // If laser is behind by LASER_VERY_FAST_THRESHOLD_POINTS+, use very fast rate
           // Only speed up if not already at this rate or faster (smaller interval = faster)
-          if (pointDifference >= 20) {
-            if (this.currentInterval > veryFastInterval) {
-              newInterval = veryFastInterval;
+          if (pointDifference >= LASER_VERY_FAST_THRESHOLD_POINTS) {
+            if (this.currentInterval > LASER_VERY_FAST_INTERVAL_MS) {
+              newInterval = LASER_VERY_FAST_INTERVAL_MS;
               console.log(
                 `Laser behind by ${pointDifference} points, speeding up to very fast rate (${newInterval}ms)`,
               );
             }
             // Already at very fast or faster, keep it
           }
-          // Else if laser is behind by 10+ points, use fast rate (5 seconds)
+          // Else if laser is behind by LASER_FAST_THRESHOLD_POINTS+, use fast rate
           // Only speed up if currently at normal rate (not already at fast or very fast)
-          else if (pointDifference >= 10) {
+          else if (pointDifference >= LASER_FAST_THRESHOLD_POINTS) {
             if (this.currentInterval >= LASER_INTERVAL_MS) {
-              newInterval = fastInterval;
+              newInterval = LASER_FAST_INTERVAL_MS;
               console.log(
                 `Laser behind by ${pointDifference} points, speeding up to fast rate (${newInterval}ms)`,
               );
             }
             // Already at fast or very fast, keep it (never slow down)
           }
-          // If player is ahead but by less than 10 points, keep current rate
+          // If player is ahead but by less than LASER_FAST_THRESHOLD_POINTS, keep current rate
           // This ensures we NEVER slow down until laserScore >= playerScore
         }
         // If scores are equal (both 0 or same value) and laser is at normal rate, keep it
@@ -252,18 +308,18 @@ export class LaserOverlay {
       }
 
       // Check every second
-      setTimeout(checkAndUpdateInterval, 1000);
+      setTimeout(checkAndUpdateInterval, LASER_INTERVAL_MONITOR_PERIOD_MS);
     };
 
     // Start monitoring after a delay to ensure bubbles are initialized
-    setTimeout(checkAndUpdateInterval, 2000);
+    setTimeout(checkAndUpdateInterval, LASER_INTERVAL_MONITOR_START_DELAY_MS);
   }
 
   resize() {
     if (!this.canvas || !this.ctx) return;
     const width = this.canvas.clientWidth || window.innerWidth;
     const height = this.canvas.clientHeight || window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || DEFAULT_DPR, MAX_DPR);
     this.dpr = dpr;
     this.canvas.width = Math.round(width * dpr);
     this.canvas.height = Math.round(height * dpr);
@@ -300,7 +356,7 @@ export class LaserOverlay {
       return;
     }
 
-    // largest of top 6
+    // largest of top pool
     const ranked = [...mainBubbles]
       .filter(
         (b) =>
@@ -310,46 +366,54 @@ export class LaserOverlay {
           b.y <= height + b.radius,
       )
       .sort((a, b) => b.radius - a.radius)
-      .slice(0, 6);
+      .slice(0, LASER_TARGET_POOL_SIZE);
     const target = ranked[0];
     if (!target) return;
 
-    const start = randomEdgePoint(width, height, 60);
+    const start = randomEdgePoint(width, height, LASER_EDGE_PADDING_PX);
     let dir = { x: target.x - start.x, y: target.y - start.y };
-    if (Math.abs(dir.x) < 1) dir.x += (Math.random() > 0.5 ? 1 : -1) * 0.5;
-    if (Math.abs(dir.y) < 1) dir.y += (Math.random() > 0.5 ? 1 : -1) * 0.5;
-    const end = extendToBoundary(start, dir, width, height, 60);
+    if (Math.abs(dir.x) < LASER_DIRECTION_MIN_COMPONENT) {
+      dir.x +=
+        (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) *
+        LASER_DIRECTION_NUDGE;
+    }
+    if (Math.abs(dir.y) < LASER_DIRECTION_MIN_COMPONENT) {
+      dir.y +=
+        (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) *
+        LASER_DIRECTION_NUDGE;
+    }
+    const end = extendToBoundary(start, dir, width, height, LASER_EDGE_PADDING_PX);
 
     this.playLaserSound();
     this.drawLaser(start, end);
     this.popBubbles(mainBubbles, target, start, end);
 
-    // Sets an expiration timestamp 1300ms in the future
+    // Sets an expiration timestamp in the future
     // Used to mark when the laser segment should no longer be considered active
-    const expires = performance.now() + 1300;
+    const expires = performance.now() + LASER_ACTIVE_DURATION_MS;
     activeLaserSegment = { start, end, expires };
     // Also stores it on window so other components (like SoapBubbles) can access it
     // The SoapBubbles component checks window.activeLaserSegment in its physics loop (around line 718-787) to detect if bubbles intersect the laser path
     window.activeLaserSegment = activeLaserSegment;
-    // After 1400ms, clears both references
-    // 1400ms is slightly longer than the 1300ms expiration to ensure cleanup happens after the laser is no longer active
+    // After the clear delay, clears both references
+    // Clear delay is slightly longer than the active duration to ensure cleanup happens after the laser is no longer active
     setTimeout(() => {
       activeLaserSegment = null;
       window.activeLaserSegment = null;
-    }, 1400);
+    }, LASER_ACTIVE_CLEAR_DELAY_MS);
   }
 
   drawLaser(start, end) {
     if (!this.ctx || !this.canvas) return;
     this.ctx.clearRect(0, 0, this.canvas.width / this.dpr, this.canvas.height / this.dpr);
     const gradient = this.ctx.createLinearGradient(start.x, start.y, end.x, end.y);
-    gradient.addColorStop(0, 'rgba(255, 120, 120, 0.7)');
-    gradient.addColorStop(0.5, 'rgba(255, 40, 40, 1)');
-    gradient.addColorStop(1, 'rgba(255, 120, 120, 0.7)');
+    gradient.addColorStop(0, LASER_GRADIENT_START);
+    gradient.addColorStop(LASER_GRADIENT_MID_STOP, LASER_GRADIENT_MID);
+    gradient.addColorStop(1, LASER_GRADIENT_END);
     this.ctx.strokeStyle = gradient;
-    this.ctx.lineWidth = 2;
-    this.ctx.shadowBlur = 6;
-    this.ctx.shadowColor = 'rgba(255, 60, 60, 0.8)';
+    this.ctx.lineWidth = LASER_LINE_WIDTH_PX;
+    this.ctx.shadowBlur = LASER_SHADOW_BLUR_PX;
+    this.ctx.shadowColor = LASER_SHADOW_COLOR;
     this.ctx.beginPath();
     this.ctx.moveTo(start.x, start.y);
     this.ctx.lineTo(end.x, end.y);
@@ -360,17 +424,17 @@ export class LaserOverlay {
     this.canvas.style.opacity = '1';
     // force reflow so the next transition applies
     void this.canvas.offsetWidth;
-    this.canvas.style.transition = 'opacity 0.8s ease-out'; // fade duration is 0.8 seconds
+    this.canvas.style.transition = `opacity ${LASER_FADE_DURATION_S}s ease-out`; // fade duration is configurable
     if (this.fadeTimeout) clearTimeout(this.fadeTimeout);
     this.fadeTimeout = window.setTimeout(() => {
       this.canvas && (this.canvas.style.opacity = '0');
-    }, 200); // fade starts after 200ms (laser visible for 200ms)
+    }, LASER_FADE_DELAY_MS); // fade starts after delay (laser visible briefly)
     if (this.clearTimeout) clearTimeout(this.clearTimeout);
     this.clearTimeout = window.setTimeout(() => {
       if (this.ctx && this.canvas) {
         this.ctx.clearRect(0, 0, this.canvas.width / this.dpr, this.canvas.height / this.dpr);
       }
-    }, 1100); // canvas is cleared after 1100ms (200ms visible + 800ms fade + 100ms buffer)
+    }, LASER_CLEAR_DELAY_MS); // cleared after visible + fade + buffer
   }
 
   popBubbles(mainBubbles, target, start, end) {
