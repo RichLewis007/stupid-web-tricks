@@ -168,10 +168,7 @@ export class LaserOverlay {
         LASER_SOUND_SUSTAIN_GAIN,
         startTime + LASER_SOUND_SUSTAIN_TIME_S,
       ); // Sustain
-      gainNode.gain.exponentialRampToValueAtTime(
-        LASER_SOUND_RELEASE_GAIN,
-        startTime + duration,
-      ); // Fade out at end
+      gainNode.gain.exponentialRampToValueAtTime(LASER_SOUND_RELEASE_GAIN, startTime + duration); // Fade out at end
 
       // Use a sine wave for a clean, high-pitched tone
       oscillator.type = 'sine';
@@ -373,14 +370,10 @@ export class LaserOverlay {
     const start = randomEdgePoint(width, height, LASER_EDGE_PADDING_PX);
     let dir = { x: target.x - start.x, y: target.y - start.y };
     if (Math.abs(dir.x) < LASER_DIRECTION_MIN_COMPONENT) {
-      dir.x +=
-        (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) *
-        LASER_DIRECTION_NUDGE;
+      dir.x += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
     }
     if (Math.abs(dir.y) < LASER_DIRECTION_MIN_COMPONENT) {
-      dir.y +=
-        (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) *
-        LASER_DIRECTION_NUDGE;
+      dir.y += (Math.random() > LASER_DIRECTION_RANDOM_THRESHOLD ? 1 : -1) * LASER_DIRECTION_NUDGE;
     }
     const end = extendToBoundary(start, dir, width, height, LASER_EDGE_PADDING_PX);
 
